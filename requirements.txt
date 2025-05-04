@@ -1,0 +1,7 @@
+PyQt5
+PyOpenGL
+pyqtgraph
+Pillow
+vmflib
+numpy
+pyinstaller
