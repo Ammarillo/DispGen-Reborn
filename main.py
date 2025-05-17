@@ -290,7 +290,7 @@ class MainWindow(QMainWindow):
                     ox, oy = tx_i * ts, ty_i * ts
                     normals = [[Vertex(0, 0, 1) for _ in range(size)] for _ in range(size)]
 
-                                        # Bilinear interpolate distances matching preview
+                    # Bilinear interpolate distances matching preview
                     xi = np.linspace(tx_i * 8, tx_i * 8 + 8, size)
                     yi = np.linspace(ty_i * 8, ty_i * 8 + 8, size)
                     xi_m, yi_m = np.meshgrid(xi, yi)
@@ -318,7 +318,8 @@ class MainWindow(QMainWindow):
                         for row in hvals
                     ]
                     disp = DispInfo(power, normals, distances)
-                    floor = Block(Vertex(ox, oy, 0), (ts, ts, hscale), mat)
+
+                    floor = Block(Vertex(ox, oy, 0), (ts, ts, 16), mat)
                     floor.top().lightmapscale = 32
                     floor.top().children.append(disp)
                     m.world.children.append(floor)
