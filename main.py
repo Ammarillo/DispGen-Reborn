@@ -112,6 +112,11 @@ class MainWindow(QMainWindow):
         self.gen_btn.setEnabled(False)
         ctrl_layout.addWidget(self.gen_btn)
 
+        # Output Dimensions
+        self.dim_label = QLabel("Final Area: \nx = 16384 units (416.15m) \ny = 16384 units (416.15m) \nz = 2048 units (52.02m)")
+        # self.dim_label.setAlignment(Qt.AlignCenter)
+        ctrl_layout.addWidget(self.dim_label)
+
         ctrl_layout.addStretch()
 
         # 3D View
@@ -150,6 +155,19 @@ class MainWindow(QMainWindow):
         self.update_image_size()
         if self.auto_update_check.isChecked() and self.preview_btn.isEnabled():
             self.preview_3d()
+        self.update_dimension_label()
+
+    def update_dimension_label(self):
+        tiles_x = self.tiles_x_spin.value()
+        tiles_y = self.tiles_y_spin.value()
+        tile_size = self.tile_spin.value()
+        height = self.height_spin.value()
+
+        total_x = tiles_x * tile_size
+        total_y = tiles_y * tile_size
+        total_z = height
+
+        self.dim_label.setText(f"Final Area: \nx = {total_x} units ({round(total_x / 39.37, 2)}m) \ny = {total_y} units ({round(total_y / 39.37, 2)}m) \nz = {total_z} units ({round(total_z / 39.37, 2)}m) ")
 
     def preview_3d(self):
         if not _has_gl or self.image is None:
