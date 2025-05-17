@@ -28,7 +28,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         QApplication.setWindowIcon(QIcon(":/resources/D-Gen_Icon.ico"))
-        self.setWindowTitle("DispGen Reborn")
+        self.setWindowTitle("DispGen Reborn v1.1")
         self.orig_image = None
         self.image = None
 
@@ -136,6 +136,7 @@ class MainWindow(QMainWindow):
             return
         try:
             self.orig_image = Image.open(path).convert('L')
+            self.orig_image = self.orig_image.transpose(Image.FLIP_LEFT_RIGHT)  # Fix flipped X-axis
             self.update_image_size()
             self.preview_btn.setEnabled(True)
             self.gen_btn.setEnabled(True)
