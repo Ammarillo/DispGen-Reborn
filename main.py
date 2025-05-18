@@ -7,333 +7,415 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QIcon, QVector3D
-import resources_rc
-from PIL import Image
-import numpy as np
+import resources_rc  # Resource file for icons, embedded via PyQt's resource system
+from PIL import Image  # PIL for image loading and manipulation
+import numpy as np  # NumPy for numerical operations on arrays
 
+# VMF libraries for building Valve Map Format files
 from vmflib import vmf
 from vmflib.types import Vertex
 from vmflib.brush import DispInfo
 from vmflib.tools import Block
 
-# Attempt to import 3D modules
+# Attempt to import OpenGL-based 3D preview modules
 try:
     import pyqtgraph as pg
     import pyqtgraph.opengl as gl
-    _has_gl = True
+    HAS_OPENGL = True  # We have OpenGL support for real-time preview
 except ModuleNotFoundError:
-    _has_gl = False
+    HAS_OPENGL = False  # 3D preview will be disabled if imports fail
 
-class MainWindow(QMainWindow):
+class DispGenWindow(QMainWindow):
+    """
+    Main application window for DispGen: a heightmap-to-VMF generator.
+    Includes controls for image import, tiling, scaling, and preview.
+    """
     def __init__(self):
         super().__init__()
+        # Set window icon and title
         QApplication.setWindowIcon(QIcon(":/resources/D-Gen_Icon.ico"))
         self.setWindowTitle("DispGen Reborn v1.1")
-        self.orig_image = None
-        self.image = None
 
-        # Main layout
-        central = QWidget()
-        self.setCentralWidget(central)
-        main_layout = QHBoxLayout(central)
+        # Store original and resized heightmap images
+        self.original_image = None
+        self.resized_image = None
 
-        # Controls
-        ctrl_widget = QWidget()
-        ctrl_layout = QVBoxLayout(ctrl_widget)
-        main_layout.addWidget(ctrl_widget, 0)
+        # Set up main container and layout: two columns (controls + preview)
+        main_container = QWidget()
+        self.setCentralWidget(main_container)
+        main_layout = QHBoxLayout(main_container)
 
-        # Load
-        self.load_btn = QPushButton("Load Heightmap")
-        self.load_btn.clicked.connect(self.load_image)
-        ctrl_layout.addWidget(self.load_btn)
+        # -- Control Panel (left) --
+        controls_panel = QWidget()
+        controls_layout = QVBoxLayout(controls_panel)
+        main_layout.addWidget(controls_panel, stretch=0)
 
-        # Tiles X/Y
-        ctrl_layout.addWidget(QLabel("Tiles X:"))
-        self.tiles_x_spin = QSpinBox()
-        self.tiles_x_spin.setRange(1, 256)
-        self.tiles_x_spin.setValue(32)
-        self.tiles_x_spin.valueChanged.connect(self.update_and_preview)
-        ctrl_layout.addWidget(self.tiles_x_spin)
+        # Button: Load a heightmap image from disk
+        self.load_heightmap_button = QPushButton("Load Heightmap")
+        self.load_heightmap_button.clicked.connect(self.on_load_heightmap)
+        controls_layout.addWidget(self.load_heightmap_button)
 
-        ctrl_layout.addWidget(QLabel("Tiles Y:"))
-        self.tiles_y_spin = QSpinBox()
-        self.tiles_y_spin.setRange(1, 256)
-        self.tiles_y_spin.setValue(32)
-        self.tiles_y_spin.valueChanged.connect(self.update_and_preview)
-        ctrl_layout.addWidget(self.tiles_y_spin)
+        # Numeric spinboxes for tile counts in X and Y directions
+        controls_layout.addWidget(QLabel("Tiles X:"))
+        self.tiles_x_spinbox = QSpinBox()
+        self.tiles_x_spinbox.setRange(1, 256)
+        self.tiles_x_spinbox.setValue(32)
+        self.tiles_x_spinbox.valueChanged.connect(self.on_parameters_changed)
+        controls_layout.addWidget(self.tiles_x_spinbox)
 
-        # Tile size / height
-        ctrl_layout.addWidget(QLabel("Tile Size (units):"))
-        self.tile_spin = QSpinBox()
-        self.tile_spin.setRange(1, 10000)
-        self.tile_spin.setValue(512)
-        self.tile_spin.valueChanged.connect(self.update_and_preview)
-        ctrl_layout.addWidget(self.tile_spin)
+        controls_layout.addWidget(QLabel("Tiles Y:"))
+        self.tiles_y_spinbox = QSpinBox()
+        self.tiles_y_spinbox.setRange(1, 256)
+        self.tiles_y_spinbox.setValue(32)
+        self.tiles_y_spinbox.valueChanged.connect(self.on_parameters_changed)
+        controls_layout.addWidget(self.tiles_y_spinbox)
 
-        ctrl_layout.addWidget(QLabel("Max Height (units):"))
-        self.height_spin = QSpinBox()
-        self.height_spin.setRange(1, 10000)
-        self.height_spin.setValue(2048)
-        self.height_spin.valueChanged.connect(self.update_and_preview)
-        ctrl_layout.addWidget(self.height_spin)
+        # Spinbox for in-game tile size (in units)
+        controls_layout.addWidget(QLabel("Tile Size (units):"))
+        self.tile_size_spinbox = QSpinBox()
+        self.tile_size_spinbox.setRange(1, 10000)
+        self.tile_size_spinbox.setValue(512)
+        self.tile_size_spinbox.valueChanged.connect(self.on_parameters_changed)
+        controls_layout.addWidget(self.tile_size_spinbox)
 
-        # Material
-        ctrl_layout.addWidget(QLabel("Material:"))
-        self.material_input = QLineEdit('dev/dev_blendmeasure')
-        ctrl_layout.addWidget(self.material_input)
+        # Spinbox for maximum height scale
+        controls_layout.addWidget(QLabel("Max Height (units):"))
+        self.max_height_spinbox = QSpinBox()
+        self.max_height_spinbox.setRange(1, 10000)
+        self.max_height_spinbox.setValue(2048)
+        self.max_height_spinbox.valueChanged.connect(self.on_parameters_changed)
+        controls_layout.addWidget(self.max_height_spinbox)
 
-        # Disp Power
-        ctrl_layout.addWidget(QLabel("Disp Power:"))
-        self.power_combo = QComboBox()
-        self.power_combo.addItems(['2', '3', '4'])
-        self.power_combo.setCurrentText('3')
-        self.power_combo.currentIndexChanged.connect(self.update_and_preview)
-        ctrl_layout.addWidget(self.power_combo)
+        # Text input for material path used on generated brushes
+        controls_layout.addWidget(QLabel("Material:"))
+        self.material_path_input = QLineEdit('dev/dev_blendmeasure')
+        controls_layout.addWidget(self.material_path_input)
 
-        # Auto Update
-        self.auto_update_check = QCheckBox("Auto Update")
-        self.auto_update_check.setChecked(True)
-        ctrl_layout.addWidget(self.auto_update_check)
+        # Combo box for displacement resolution (power-of-two subdivisions)
+        controls_layout.addWidget(QLabel("Disp Power:"))
+        self.displacement_power_combo = QComboBox()
+        self.displacement_power_combo.addItems(['2', '3', '4'])
+        self.displacement_power_combo.setCurrentText('3')
+        self.displacement_power_combo.currentIndexChanged.connect(self.on_parameters_changed)
+        controls_layout.addWidget(self.displacement_power_combo)
 
-        # Show Tiles
-        self.grid_check = QCheckBox("Show Tiles")
-        self.grid_check.setChecked(False)
-        self.grid_check.toggled.connect(self.preview_3d)
-        ctrl_layout.addWidget(self.grid_check)
+        # Checkbox: automatically update preview when parameters change
+        self.auto_update_checkbox = QCheckBox("Auto Update")
+        self.auto_update_checkbox.setChecked(True)
+        controls_layout.addWidget(self.auto_update_checkbox)
 
-        # Preview / Generate
-        self.preview_btn = QPushButton("Preview 3D")
-        self.preview_btn.clicked.connect(self.preview_3d)
-        self.preview_btn.setEnabled(False)
-        ctrl_layout.addWidget(self.preview_btn)
+        # Checkbox: toggle drawing of tile boundary grid in preview
+        self.show_grid_checkbox = QCheckBox("Show Tiles")
+        self.show_grid_checkbox.setChecked(False)
+        self.show_grid_checkbox.toggled.connect(self.render_3d_preview)
+        controls_layout.addWidget(self.show_grid_checkbox)
 
-        self.gen_btn = QPushButton("Generate VMF")
-        self.gen_btn.clicked.connect(self.generate_vmf)
-        self.gen_btn.setEnabled(False)
-        ctrl_layout.addWidget(self.gen_btn)
+        # Buttons for manual preview and VMF export
+        self.preview_button = QPushButton("Preview 3D")
+        self.preview_button.clicked.connect(self.render_3d_preview)
+        self.preview_button.setEnabled(False)
+        controls_layout.addWidget(self.preview_button)
 
-        # Output Dimensions
-        self.dim_label = QLabel("Final Area: \nx = 16384 units (416.15m) \ny = 16384 units (416.15m) \nz = 2048 units (52.02m)")
-        # self.dim_label.setAlignment(Qt.AlignCenter)
-        ctrl_layout.addWidget(self.dim_label)
+        self.generate_button = QPushButton("Generate VMF")
+        self.generate_button.clicked.connect(self.export_vmf)
+        self.generate_button.setEnabled(False)
+        controls_layout.addWidget(self.generate_button)
 
-        ctrl_layout.addStretch()
+        # Label showing final world dimensions in units and approximate meters
+        self.dimensions_label = QLabel(
+            "Final Area: \n"
+            "x = 16384 units (416.15m) \n"
+            "y = 16384 units (416.15m) \n"
+            "z = 2048 units (52.02m)"
+        )
+        controls_layout.addWidget(self.dimensions_label)
+        controls_layout.addStretch()  # Push controls to top
 
-        # 3D View
-        if _has_gl:
-            self.view = gl.GLViewWidget()
-            main_layout.addWidget(self.view, 1)
+        # -- 3D Preview (right) --
+        if HAS_OPENGL:
+            # Use pyqtgraph's OpenGL widget for real-time mesh display
+            self.gl_view = gl.GLViewWidget()
+            main_layout.addWidget(self.gl_view, stretch=1)
         else:
-            placeholder = QLabel("3D preview disabled.\nInstall PyOpenGL and pyqtgraph.")
-            placeholder.setAlignment(Qt.AlignCenter)
-            main_layout.addWidget(placeholder, 1)
+            # Placeholder text if OpenGL is unavailable
+            placeholder_label = QLabel(
+                "3D preview disabled.\nInstall PyOpenGL and pyqtgraph."
+            )
+            placeholder_label.setAlignment(Qt.AlignCenter)
+            main_layout.addWidget(placeholder_label, stretch=1)
 
-    def load_image(self):
-        path, _ = QFileDialog.getOpenFileName(
+    def on_load_heightmap(self):
+        """
+        Handler for clicking 'Load Heightmap'.
+        Opens a file dialog, loads an 8-bit grayscale image, flips it, and triggers preview.
+        """
+        file_path, _ = QFileDialog.getOpenFileName(
             self, "Open Heightmap", filter="Images (*.png *.bmp *.jpg *.tga)"
         )
-        if not path:
-            return
+        if not file_path:
+            return  # User cancelled
         try:
-            self.orig_image = Image.open(path).convert('L')
-            self.orig_image = self.orig_image.transpose(Image.FLIP_LEFT_RIGHT)  # Fix flipped X-axis
-            self.update_image_size()
-            self.preview_btn.setEnabled(True)
-            self.gen_btn.setEnabled(True)
-            if self.auto_update_check.isChecked():
-                self.preview_3d()
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to load image:\n{e}")
+            # Load and convert to grayscale
+            loaded_image = Image.open(file_path).convert('L')
+            # Flip horizontally to correct orientation
+            self.original_image = loaded_image.transpose(Image.FLIP_LEFT_RIGHT)
+            self.resize_heightmap_image()
+            # Enable preview and generate now that we have an image
+            self.preview_button.setEnabled(True)
+            self.generate_button.setEnabled(True)
+            if self.auto_update_checkbox.isChecked():
+                self.render_3d_preview()
+        except Exception as error:
+            # Show error popup if loading fails
+            QMessageBox.critical(
+                self, "Error", f"Failed to load heightmap:\n{error}"
+            )
 
-    def update_image_size(self):
-        if not self.orig_image:
+    def on_parameters_changed(self):
+        """
+        Triggered when any spinbox or combo box value changes.
+        Resizes the image for tiling, optionally updates preview, and updates the dimension label.
+        """
+        self.resize_heightmap_image()
+        if self.auto_update_checkbox.isChecked() and self.preview_button.isEnabled():
+            self.render_3d_preview()
+        self.update_dimensions_label()
+
+    def resize_heightmap_image(self):
+        """
+        Rescale the original heightmap to match the selected number of tiles.
+        Each tile corresponds to an 8x8 pixel block in the heightmap.
+        """
+        if self.original_image is None:
             return
-        w = self.tiles_x_spin.value() * 8
-        h = self.tiles_y_spin.value() * 8
-        self.image = self.orig_image.resize((w, h), Image.BILINEAR)
+        # Compute new size (tiles_x * 8, tiles_y * 8)
+        target_width = self.tiles_x_spinbox.value() * 8
+        target_height = self.tiles_y_spinbox.value() * 8
+        self.resized_image = self.original_image.resize(
+            (target_width, target_height), Image.BILINEAR
+        )  # Bilinear interpolation for smoother heights
 
-    def update_and_preview(self):
-        self.update_image_size()
-        if self.auto_update_check.isChecked() and self.preview_btn.isEnabled():
-            self.preview_3d()
-        self.update_dimension_label()
+    def update_dimensions_label(self):
+        """
+        Update the text label showing final map dimensions in engine units and meters.
+        """
+        num_tiles_x = self.tiles_x_spinbox.value()
+        num_tiles_y = self.tiles_y_spinbox.value()
+        tile_size = self.tile_size_spinbox.value()
+        max_height = self.max_height_spinbox.value()
 
-    def update_dimension_label(self):
-        tiles_x = self.tiles_x_spin.value()
-        tiles_y = self.tiles_y_spin.value()
-        tile_size = self.tile_spin.value()
-        height = self.height_spin.value()
+        # Compute world extents
+        total_width = num_tiles_x * tile_size
+        total_depth = num_tiles_y * tile_size
+        total_height = max_height
 
-        total_x = tiles_x * tile_size
-        total_y = tiles_y * tile_size
-        total_z = height
+        # Convert units to meters (1 unit = 1/39.37 m)
+        meters_width = round(total_width / 39.37, 2)
+        meters_depth = round(total_depth / 39.37, 2)
+        meters_height = round(total_height / 39.37, 2)
 
-        self.dim_label.setText(f"Final Area: \nx = {total_x} units ({round(total_x / 39.37, 2)}m) \ny = {total_y} units ({round(total_y / 39.37, 2)}m) \nz = {total_z} units ({round(total_z / 39.37, 2)}m) ")
+        # Update label text with calculated values
+        self.dimensions_label.setText(
+            f"Final Area: \n"
+            f"x = {total_width} units ({meters_width}m) \n"
+            f"y = {total_depth} units ({meters_depth}m) \n"
+            f"z = {total_height} units ({meters_height}m)"
+        )
 
-    def preview_3d(self):
-        if not _has_gl or self.image is None:
+    def render_3d_preview(self):
+        """
+        Generate and display a 3D mesh from the resized heightmap in the OpenGL widget.
+        Uses bilinear interpolation to match the VMF displacement sampling.
+        """
+        if not HAS_OPENGL or self.resized_image is None:
             return
-        cols, rows = self.image.size
-        tx = self.tiles_x_spin.value()
-        ty = self.tiles_y_spin.value()
-        ts = self.tile_spin.value()
-        hscale = self.height_spin.value()
-        if cols != tx * 8 or rows != ty * 8:
-            return
 
-        data = np.array(self.image)
+        # Convert heightmap to NumPy array for fast math
+        heightmap_data = np.array(self.resized_image)
+        tiles_x = self.tiles_x_spinbox.value()
+        tiles_y = self.tiles_y_spinbox.value()
+        tile_size = self.tile_size_spinbox.value()
+        height_scale = self.max_height_spinbox.value()
+        power_level = int(self.displacement_power_combo.currentText())
+        resolution = 2 ** power_level  # subdivisions per tile edge
 
-        # Preview: bilinear interpolate height for chosen power
-        power = int(self.power_combo.currentText())
-        disp_res = 2**power
-        nx = tx * disp_res + 1
-        ny = ty * disp_res + 1
-        xi = np.linspace(0, cols - 1, nx)
-        yi = np.linspace(0, rows - 1, ny)
-        xi_m, yi_m = np.meshgrid(xi, yi)
-        x0 = np.floor(xi_m).astype(int)
-        y0 = np.floor(yi_m).astype(int)
-        x1 = np.clip(x0 + 1, 0, cols - 1)
-        y1 = np.clip(y0 + 1, 0, rows - 1)
-        dx = xi_m - x0
-        dy = yi_m - y0
-        h00 = data[y0, x0]
-        h10 = data[y0, x1]
-        h01 = data[y1, x0]
-        h11 = data[y1, x1]
-        hvals = (h00 * (1 - dx) * (1 - dy)
-                 + h10 * dx * (1 - dy)
-                 + h01 * (1 - dx) * dy
-                 + h11 * dx * dy)
-        zz = hvals / 255.0 * hscale
+        # Calculate numbers of vertices in x/y directions (including shared edges)
+        vertices_x = tiles_x * resolution + 1
+        vertices_y = tiles_y * resolution + 1
 
-        xs = np.linspace(0, tx * ts, nx)
-        ys = np.linspace(0, ty * ts, ny)
-        xx, yy = np.meshgrid(xs, ys)
-        verts = np.column_stack((xx.flatten(), yy.flatten(), zz.flatten()))
+        # Create sampling grids over pixel space
+        sample_x = np.linspace(0, heightmap_data.shape[1] - 1, vertices_x)
+        sample_y = np.linspace(0, heightmap_data.shape[0] - 1, vertices_y)
+        grid_x, grid_y = np.meshgrid(sample_x, sample_y)
 
-        faces = []
-        for i in range(ny - 1):
-            for j in range(nx - 1):
-                idx = i * nx + j
-                faces.append([idx, idx + 1, idx + nx])
-                faces.append([idx + 1, idx + nx + 1, idx + nx])
-        faces = np.array(faces)
+        # Find integer indices for bilinear interpolation corners
+        x0 = np.floor(grid_x).astype(int)
+        y0 = np.floor(grid_y).astype(int)
+        x1 = np.clip(x0 + 1, 0, heightmap_data.shape[1] - 1)
+        y1 = np.clip(y0 + 1, 0, heightmap_data.shape[0] - 1)
+        dx = grid_x - x0  # fractional offsets
+        dy = grid_y - y0
 
-        # Color
-        zmin, zmax = zz.min(), zz.max()
-        norm = (zz.flatten() - zmin) / (zmax - zmin if zmax != zmin else 1)
-        colors = np.vstack([norm, norm, norm, np.ones_like(norm)]).T
+        # Gather corner heights
+        h00 = heightmap_data[y0, x0]
+        h10 = heightmap_data[y0, x1]
+        h01 = heightmap_data[y1, x0]
+        h11 = heightmap_data[y1, x1]
 
-        self.view.clear()
-        mesh = gl.GLMeshItem(
-            vertexes=verts,
-            faces=faces,
-            vertexColors=colors,
+        # Bilinear interpolation formula
+        interpolated = (
+            h00 * (1 - dx) * (1 - dy)
+            + h10 * dx * (1 - dy)
+            + h01 * (1 - dx) * dy
+            + h11 * dx * dy
+        )
+        # Scale to world height
+        height_values = interpolated / 255.0 * height_scale
+
+        # Generate world coordinates for vertices
+        world_x = np.linspace(0, tiles_x * tile_size, vertices_x)
+        world_y = np.linspace(0, tiles_y * tile_size, vertices_y)
+        mesh_x, mesh_y = np.meshgrid(world_x, world_y)
+        mesh_vertices = np.column_stack((mesh_x.flatten(), mesh_y.flatten(), height_values.flatten()))
+
+        # Build face index list (two triangles per quad)
+        mesh_faces = []
+        for row in range(vertices_y - 1):
+            for col in range(vertices_x - 1):
+                idx = row * vertices_x + col
+                # Triangle 1
+                mesh_faces.append([idx, idx + 1, idx + vertices_x])
+                # Triangle 2
+                mesh_faces.append([idx + 1, idx + vertices_x + 1, idx + vertices_x])
+        mesh_faces = np.array(mesh_faces)
+
+        # Color by normalized height (grayscale)
+        min_h, max_h = height_values.min(), height_values.max()
+        if max_h != min_h:
+            normalized = (height_values.flatten() - min_h) / (max_h - min_h)
+        else:
+            normalized = np.zeros_like(height_values.flatten())
+        mesh_colors = np.vstack([normalized, normalized, normalized, np.ones_like(normalized)]).T
+
+        # Clear previous items and add new mesh
+        self.gl_view.clear()
+        mesh_item = gl.GLMeshItem(
+            vertexes=mesh_vertices,
+            faces=mesh_faces,
+            vertexColors=mesh_colors,
             smooth=False,
             drawEdges=False,
             drawFaces=True,
             glOptions='opaque'
         )
-        self.view.addItem(mesh)
+        self.gl_view.addItem(mesh_item)
 
-        # Tile borders
-        if self.grid_check.isChecked():
-            border_color = (0.2, 0.2, 0.2, 1.0)
-            for i in range(1, tx):
-                idx = i * disp_res
-                pts = np.column_stack((
-                    np.full(ny, xs[idx]),
-                    ys,
-                    zz[:, idx]
+        # Draw grid lines if requested
+        if self.show_grid_checkbox.isChecked():
+            line_color = (0.2, 0.2, 0.2, 1.0)
+            # Vertical lines between tile columns
+            for tile_idx in range(1, tiles_x):
+                x_coord = tile_idx * resolution
+                line_positions = np.column_stack((
+                    np.full(vertices_y, world_x[x_coord]),
+                    world_y,
+                    height_values[:, x_coord]
                 ))
-                self.view.addItem(gl.GLLinePlotItem(pos=pts, color=border_color, width=2, antialias=True))
-            for j in range(1, ty):
-                idx = j * disp_res
-                pts = np.column_stack((
-                    xs,
-                    np.full(nx, ys[idx]),
-                    zz[idx, :]
+                self.gl_view.addItem(gl.GLLinePlotItem(pos=line_positions, color=line_color, width=2, antialias=True))
+            # Horizontal lines between tile rows
+            for tile_idx in range(1, tiles_y):
+                y_coord = tile_idx * resolution
+                line_positions = np.column_stack((
+                    world_x,
+                    np.full(vertices_x, world_y[y_coord]),
+                    height_values[y_coord, :]
                 ))
-                self.view.addItem(gl.GLLinePlotItem(pos=pts, color=border_color, width=2, antialias=True))
+                self.gl_view.addItem(gl.GLLinePlotItem(pos=line_positions, color=line_color, width=2, antialias=True))
 
-        # Camera fit
-        center = QVector3D(tx * ts / 2, ty * ts / 2, hscale / 2)
-        dist = max(tx * ts, ty * ts) * 1.5
-        self.view.setCameraPosition(distance=dist, elevation=30, azimuth=45)
-        self.view.opts['center'] = center
+        # Position camera to view entire mesh
+        center_point = QVector3D(tiles_x * tile_size / 2, tiles_y * tile_size / 2, height_scale / 2)
+        camera_distance = max(tiles_x * tile_size, tiles_y * tile_size) * 1.5
+        self.gl_view.setCameraPosition(distance=camera_distance, elevation=30, azimuth=45)
+        self.gl_view.opts['center'] = center_point
 
-    def generate_vmf(self):
-        if self.image is None:
+    def export_vmf(self):
+        """
+        Generate a .vmf file from the resized heightmap.
+        Iterates over each tile, samples heights, creates displacement brushes, and writes the VMF.
+        """
+        if self.resized_image is None:
             QMessageBox.warning(self, "No Heightmap", "Load a heightmap first.")
             return
-        ts = self.tile_spin.value()
-        hscale = self.height_spin.value()
-        power = int(self.power_combo.currentText())
-        disp_res = 2**power
-        size = disp_res + 1
-        mat = self.material_input.text().strip() or 'dev/dev_blendmeasure'
 
-        out, _ = QFileDialog.getSaveFileName(
-            self, "Save VMF...", filter="VMF Files (*.vmf)"
-        )
-        if not out:
+        tile_size = self.tile_size_spinbox.value()
+        height_scale = self.max_height_spinbox.value()
+        power_level = int(self.displacement_power_combo.currentText())
+        resolution = 2 ** power_level
+        sample_size = resolution + 1
+        material_path = self.material_path_input.text().strip() or 'dev/dev_blendmeasure'
+
+        save_path, _ = QFileDialog.getSaveFileName(self, "Save VMF...", filter="VMF Files (*.vmf)")
+        if not save_path:
             return
 
         try:
-            m = vmf.ValveMap()
-            data = np.array(self.image)
-            cols, rows = data.shape[1], data.shape[0]
+            valve_map = vmf.ValveMap()  # Root VMF object
+            height_array = np.array(self.resized_image)
+            img_width, img_height = height_array.shape[1], height_array.shape[0]
 
-            for ty_i in range(self.tiles_y_spin.value()):
-                for tx_i in range(self.tiles_x_spin.value()):
-                    ox, oy = tx_i * ts, ty_i * ts
-                    normals = [[Vertex(0, 0, 1) for _ in range(size)] for _ in range(size)]
+            # Loop over each tile row & column
+            for row_idx in range(self.tiles_y_spinbox.value()):
+                for col_idx in range(self.tiles_x_spinbox.value()):
+                    offset_x = col_idx * tile_size
+                    offset_y = row_idx * tile_size
 
-                    # Bilinear interpolate distances matching preview
-                    xi = np.linspace(tx_i * 8, tx_i * 8 + 8, size)
-                    yi = np.linspace(ty_i * 8, ty_i * 8 + 8, size)
-                    xi_m, yi_m = np.meshgrid(xi, yi)
-                    # clamp x0,y0 to valid range
-                    x0 = np.floor(xi_m).astype(int)
-                    y0 = np.floor(yi_m).astype(int)
-                    x0 = np.clip(x0, 0, cols - 1)
-                    y0 = np.clip(y0, 0, rows - 1)
-                    x1 = np.clip(x0 + 1, 0, cols - 1)
-                    y1 = np.clip(y0 + 1, 0, rows - 1)
-                    dx = xi_m - x0
-                    dy = yi_m - y0
-                    h00 = data[y0, x0]
-                    h10 = data[y0, x1]
-                    h01 = data[y1, x0]
-                    h11 = data[y1, x1]
-                    hvals = (
+                    # Prepare default vertex normals facing up
+                    vertex_normals = [[Vertex(0, 0, 1) for _ in range(sample_size)] for _ in range(sample_size)]
+
+                    # Sample heights using bilinear interpolation
+                    xs = np.linspace(col_idx * 8, col_idx * 8 + 8, sample_size)
+                    ys = np.linspace(row_idx * 8, row_idx * 8 + 8, sample_size)
+                    grid_x, grid_y = np.meshgrid(xs, ys)
+                    x0 = np.clip(np.floor(grid_x).astype(int), 0, img_width - 1)
+                    y0 = np.clip(np.floor(grid_y).astype(int), 0, img_height - 1)
+                    x1 = np.clip(x0 + 1, 0, img_width - 1)
+                    y1 = np.clip(y0 + 1, 0, img_height - 1)
+                    dx = grid_x - x0
+                    dy = grid_y - y0
+
+                    h00 = height_array[y0, x0]
+                    h10 = height_array[y0, x1]
+                    h01 = height_array[y1, x0]
+                    h11 = height_array[y1, x1]
+
+                    interpolated_heights = (
                         h00 * (1 - dx) * (1 - dy)
                         + h10 * dx * (1 - dy)
                         + h01 * (1 - dx) * dy
                         + h11 * dx * dy
                     )
-                    distances = [
-                        [int(round(val / 255.0 * hscale)) for val in row]
-                        for row in hvals
-                    ]
-                    disp = DispInfo(power, normals, distances)
 
-                    floor = Block(Vertex(ox, oy, 0), (ts, ts, 16), mat)
-                    floor.top().lightmapscale = 32
-                    floor.top().children.append(disp)
-                    m.world.children.append(floor)
+                    # Convert pixel values to integer world heights
+                    height_distances = [[int(round(val / 255.0 * height_scale)) for val in row] for row in interpolated_heights]
+                    disp_info = DispInfo(power_level, vertex_normals, height_distances)
 
-            m.write_vmf(out)
-            QMessageBox.information(self, "Success", f"VMF saved to: {out}")
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Error writing VMF:\n{e}")
+                    # Create base brush for this tile and attach displacement
+                    floor_block = Block(Vertex(offset_x, offset_y, 0), (tile_size, tile_size, 16), material_path)
+                    floor_block.top().lightmapscale = 32
+                    floor_block.top().children.append(disp_info)
+                    valve_map.world.children.append(floor_block)
+
+            valve_map.write_vmf(save_path)
+            QMessageBox.information(self, "Success", f"VMF saved to: {save_path}")
+        except Exception as error:
+            QMessageBox.critical(self, "Error", f"Error writing VMF:\n{error}")
 
 if __name__ == '__main__':
-    if _has_gl:
+    # Enable antialiasing for nicer lines if OpenGL is available
+    if HAS_OPENGL:
         pg.setConfigOptions(antialias=True)
     app = QApplication(sys.argv)
-    win = MainWindow()
-    win.resize(1024, 768)
-    win.show()
+    main_window = DispGenWindow()
+    main_window.resize(1024, 768)
+    main_window.show()
     sys.exit(app.exec_())
